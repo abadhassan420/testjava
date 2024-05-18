@@ -1,0 +1,275 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation template to create and integrate an Amazon Lex bot with an existing Amazon Connect instance with multilingual support.
+
+Parameters:
+  ConnectInstanceId:
+    Type: String
+    Description: The ID of the existing Amazon Connect instance
+
+Resources:
+  # Create a Lex Bot
+  LexBot:
+    Type: AWS::Lex::Bot
+    Properties:
+      Name: ConnectLexBot
+      Description: Bot for Amazon Connect integration
+      Locale:
+        - Id: en_US
+          VoiceId: Joanna
+        - Id: fr_FR
+          VoiceId: Celine
+      ChildDirected: false
+      IdleSessionTTLInSeconds: 300
+      Intents:
+        - IntentName: LanguageSelection
+          IntentVersion: "$LATEST"
+        - IntentName: QueueStart
+          IntentVersion: "$LATEST"
+        - IntentName: CarSelector
+          IntentVersion: "$LATEST"
+      ClarificationPrompt:
+        MaxAttempts: 2
+        Messages:
+          - Content: "Sorry, I didn't understand that. Can you please repeat?"
+            ContentType: PlainText
+      AbortStatement:
+        Messages:
+          - Content: "Sorry, I am unable to assist at the moment."
+            ContentType: PlainText
+
+  # Define Lex Intents
+  LanguageSelectionIntent:
+    Type: AWS::Lex::Intent
+    Properties:
+      Name: LanguageSelection
+      Description: "Intent for selecting language"
+      SampleUtterances:
+        - "English"
+        - "French"
+      FulfillmentActivity:
+        Type: ReturnIntent
+      Slots: []
+
+  QueueStartIntent:
+    Type: AWS::Lex::Intent
+    Properties:
+      Name: QueueStart
+      Description: "Intent for starting the queue"
+      SampleUtterances:
+        - "Start queue"
+        - "Begin queue"
+      FulfillmentActivity:
+        Type: ReturnIntent
+      Slots: []
+
+  CarSelectorIntent:
+    Type: AWS::Lex::Intent
+    Properties:
+      Name: CarSelector
+      Description: "Intent for selecting a car"
+      SampleUtterances:
+        - "I want to order a car"
+        - "Order a car"
+      FulfillmentActivity:
+        Type: ReturnIntent
+      Slots:
+        - Name: CarType
+          SlotType: CustomCarType
+          SlotConstraint: Required
+          ValueElicitationPrompt:
+            MaxAttempts: 2
+            Messages:
+              - Content: "What type of car would you like to order?"
+                ContentType: PlainText
+        - Name: Color
+          SlotType: CustomColor
+          SlotConstraint: Required
+          ValueElicitationPrompt:
+            MaxAttempts: 2
+            Messages:
+              - Content: "What color would you like?"
+                ContentType: PlainText
+        - Name: DeliveryDay
+          SlotType: CustomDay
+          SlotConstraint: Required
+          ValueElicitationPrompt:
+            MaxAttempts: 2
+            Messages:
+              - Content: "What day do you want it delivered?"
+                ContentType: PlainText
+
+  # Custom Slot Types
+  CustomColorSlotType:
+    Type: AWS::Lex::SlotType
+    Properties:
+      Name: CustomColor
+      Description: "Custom slot type for selecting a color"
+      EnumerationValues:
+        - Value: "Black"
+        - Value: "White"
+        - Value: "Red"
+        - Value: "Blue"
+
+  CustomCarTypeSlotType:
+    Type: AWS::Lex::SlotType
+    Properties:
+      Name: CustomCarType
+      Description: "Custom slot type for selecting a car type"
+      EnumerationValues:
+        - Value: "SUV"
+        - Value: "Sports"
+        - Value: "Minivan"
+
+  CustomDaySlotType:
+    Type: AWS::Lex::SlotType
+    Properties:
+      Name: CustomDay
+      Description: "Custom slot type for selecting a day"
+      EnumerationValues:
+        - Value: "Monday"
+        - Value: "Tuesday"
+        - Value: "Friday"
+
+  # Create an Amazon Connect Contact Flow
+  ConnectContactFlow:
+    Type: AWS::Connect::ContactFlow
+    Properties:
+      InstanceArn: !Sub "arn:aws:connect:${AWS::Region}:${AWS::AccountId}:instance/${ConnectInstanceId}"
+      Name: LexBotIntegrationFlow
+      Type: CONTACT_FLOW
+      Content: !Sub |
+        {
+          "Version": "2019-10-30",
+          "StartAction": {
+            "Identifier": "entry",
+            "Type": "EntryPoint"
+          },
+          "Actions": [
+            {
+              "Identifier": "languageSelection",
+              "Type": "Message",
+              "Parameters": {
+                "Text": "Please say English or French to continue in your preferred language",
+                "VoiceId": "Joanna"
+              },
+              "Transitions": {
+                "NextAction": {
+                  "Identifier": "invokeLexBot"
+                }
+              }
+            },
+            {
+              "Identifier": "invokeLexBot",
+              "Type": "InvokeLexBot",
+              "Parameters": {
+                "BotAliasArn": !Sub "arn:aws:lex:${AWS::Region}:${AWS::AccountId}:bot-alias/${LexBot.Name}/$LATEST"
+              },
+              "Transitions": {
+                "NextAction": {
+                  "Identifier": "checkEmergency"
+                }
+              }
+            },
+            {
+              "Identifier": "checkEmergency",
+              "Type": "InvokeAWSLambdaFunction",
+              "Parameters": {
+                "LambdaFunctionARN": "arn:aws:lambda:us-east-1:123456789012:function:GetEmergencyState",
+                "LambdaInput": "{}"
+              },
+              "Transitions": {
+                "NextAction": {
+                  "Conditions": [
+                    {
+                      "ConditionType": "StringEquals",
+                      "Parameter": "$.Details.Parameters.IsContactCenterInEmergency",
+                      "Value": "true",
+                      "NextAction": {
+                        "Identifier": "emergencyMessage"
+                      }
+                    }
+                  ],
+                  "DefaultAction": {
+                    "Identifier": "checkHoliday"
+                  }
+                }
+              }
+            },
+            {
+              "Identifier": "emergencyMessage",
+              "Type": "Message",
+              "Parameters": {
+                "Text": "There has been a technical error. Goodbye.",
+                "VoiceId": "Joanna"
+              },
+              "Transitions": {
+                "NextAction": {
+                  "Identifier": "disconnect"
+                }
+              }
+            },
+            {
+              "Identifier": "checkHoliday",
+              "Type": "InvokeAWSLambdaFunction",
+              "Parameters": {
+                "LambdaFunctionARN": "arn:aws:lambda:us-east-1:123456789012:function:QueryHolidayState",
+                "LambdaInput": "{}"
+              },
+              "Transitions": {
+                "NextAction": {
+                  "Conditions": [
+                    {
+                      "ConditionType": "StringEquals",
+                      "Parameter": "$.Details.Parameters.State",
+                      "Value": "IN_HOLIDAY",
+                      "NextAction": {
+                        "Identifier": "holidayMessage"
+                      }
+                    }
+                  ],
+                  "DefaultAction": {
+                    "Identifier": "noAgentsAvailable"
+                  }
+                }
+              }
+            },
+            {
+              "Identifier": "holidayMessage",
+              "Type": "Message",
+              "Parameters": {
+                "Text": "We are closed in observance of the holiday. Stay on the line to leave a voicemail.",
+                "VoiceId": "Joanna"
+              },
+              "Transitions": {
+                "NextAction": {
+                  "Identifier": "disconnect"
+                }
+              }
+            },
+            {
+              "Identifier": "noAgentsAvailable",
+              "Type": "Message",
+              "Parameters": {
+                "Text": "Unfortunately no one is able to take your call right now. Please call back on the next business day.",
+                "VoiceId": "Joanna"
+              },
+              "Transitions": {
+                "NextAction": {
+                  "Identifier": "disconnect"
+                }
+              }
+            },
+            {
+              "Identifier": "disconnect",
+              "Type": "Disconnect"
+            }
+          ]
+        }
+
+Outputs:
+  ConnectContactFlowId:
+    Description: "ID of the created Amazon Connect contact flow"
+    Value: !Ref ConnectContactFlow
+  LexBotName:
+    Description: "Name of the created Lex bot"
+    Value: !GetAtt LexBot.Name
